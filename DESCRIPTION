@@ -1,0 +1,21 @@
+Package: oatk
+Title: OATK: One-at-a-time Knockoffs
+Version: 0.0.1
+Authors@R: 
+    person("Charlie", "Guan", , "charlie.guan@northwestern.edu", role = c("aut", "cre"))
+Description: OATK is a procedure by Guan, Ren and Apley (2025) to conduct variable selection with controlled false discovery rate. 
+License: GPL (>= 3) + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.2.3
+Imports:
+  knockoff,
+  SNPknock,
+  MASS,
+  data.table,
+  glmnet,
+  stringr,
+  stats,
+  utils
+  
+  
