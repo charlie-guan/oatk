@@ -7,7 +7,7 @@ install_github("charlie-guan/oatk")
 ```
 
 ## Examples
-The following examples illustrate the basic usage of the OATK package. OATK is designed for any design matrix that is low-dimensional, i.e., p (# of columns) < n (# of rows). These examples are inspired by the numerical results of Guan, Ren, and Apley (2025).
+The following examples illustrate the basic usage of the OATK package. OATK is designed for any design matrix that is low-dimensional, i.e., p (# of columns) < n (# of rows). These examples are inspired by the numerical results of "One-at-a-time knockoffs: controlled false discovery rate with higher power" by Guan, Ren, and Apley (2025). The preprint is available at https://arxiv.org/abs/2502.18750.
 
 ## Example 1
 We generate the design matrix with i.i.d. rows, and each row is multivariate normal with zero mean and power-decaying covariance. Below, we conduct the basic OATK procedure, derandomized OATK (which reduces variance and improves FDR control), and multi-bit OATK (which generates p-values).
