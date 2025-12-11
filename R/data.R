@@ -61,6 +61,43 @@ getGaussianX = function(n, p, rho=0.4, mode="power_decay") {
 }
 
 
+#' getToeplitzX
+#'
+#' @description generates a random design matrix X from a multivariate normal with
+#' zero mean and a covariance matrix that is Toeplitz (block diagonal). See
+#' Guan, Ren and Apley (2025) for further details.
+#'
+#' @param n Number of rows of X
+#' @param p Number of columns of X **(must be divisible by 10)**.
+#' @param rho Numeric. Value on the first off-diagonal inside each block; farther
+#'            off-diagonals decrease linearly to 0.
+#'
+#' @return Design matrix X with n rows and p columns
+#' @export
+#' @importFrom MASS mvrnorm
+#' @importFrom Matrix as.matrix
+#' @importFrom Matrix bdiag
+#' @importFrom stats toeplitz
+getToeplitzX = function(n, p, rho=0.5) {
+  if (p %% 10 != 0)
+    stop("`p` must be a multiple of 10 so each of the 10 blocks has equal size.")
+
+  b <- p / 10                        # block dimension
+  # first row of a Toeplitz block: 1 on the diagonal, then rho → 0 linearly
+  first_row <- c(1, seq(from = (b-2) * rho / (b-1), to = 0, length.out = b - 1))
+  T_block   <- stats::toeplitz(first_row)   # stats::toeplitz creates the full dense block
+
+  # Assemble a block-diagonal matrix with 10 identical Toeplitz blocks
+  # Matrix::bdiag returns a sparse matrix; wrap in as.matrix() for dense output.
+  blocks <- replicate(10, T_block, simplify = FALSE)
+  Sigma = Matrix::as.matrix(Matrix::bdiag(blocks))
+
+  X = mvrnorm(n, mu=rep(0, p), Sigma)
+  X = scale(X) / sqrt(n-1)  ## normalize the design matrix
+    
+    return(X)
+}
+
 
 #' getDMCX
 #'
