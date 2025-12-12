@@ -275,6 +275,384 @@ oatk = function (y, X, q=0.1, lam.ridge=NULL, offset=0, U=NULL, V=NULL, D=NULL)
 
 
 
+#' One-at-a-time Knockoffs (OATK)
+#'
+#' @description OATK is a variable selection procedure that controls the false discovery rate (FDR).
+#' Proposed by Guan, Ren, and Apley (2025), it achieves higher power compared to other FDR-controlling
+#' procedures such as Benjamini-Hochberg, knockoff filter, and Gaussian mirror. This implementation conducts
+#' lasso for the knockoff regression. 
+#'
+#' @param y Response variable
+#' @param X Design matrix
+#' @param q The desired FDR level
+#' @param lam.ridge The ridge parameter used to fit the regression model. If null, the function will find the optimal
+#' value using leave-one-out cross-validation.
+#' @param offset Offset parameter when estimated the FDR. Setting c=1 results in a more conservative FDR result.
+#' @param U the matrix U from the singular value decomposition of X=UDV^t. If any of U, D, or V is null, the function will compute them
+#' using svd().
+#' @param D the matrix D from the singular value decomposition of X=UDV^t
+#' @param V the matrix V from the singular value decomposition of X=UDV^t
+#'
+#' @return A list containing the vector rej, which are the indices of the columns of X corresponding to the non-null variables,
+#' the vector W which are the test statistics for each variable, the numeric threshold used to create the rejection set,
+#' and numeric lam.ridge which was the used ridge parameter.
+#'
+#'
+#' @importFrom knockoff knockoff.threshold
+#' @importFrom stats rnorm
+#'
+#' @export
+oatk_lasso = function (y, X, q=0.1, lam.ridge=NULL, offset=0, U=NULL, V=NULL, D=NULL)
+{
+  n = length(y)
+  p = dim(X)[2]
+  #  "OATK is only supported for low-dimensional setting (p<n)."
+  stopifnot(p < n)
+
+  # make sure X is scaled to unit norm
+  X = scale(X) / sqrt(n-1)  ## normalize the design matrix
+  y = y - mean(y)
+
+
+  if (is.null(U) || is.null(V) || is.null(D)) {
+    # get relevant matrices from SVD
+    SVD.X = svd(X) #X = U%*%diag(D)%*%t(V)
+    U = SVD.X$u #nxp matrix
+    V = SVD.X$v #pxp matrix
+    D = SVD.X$d #px1 vector
+  }
+
+  lam = D^2 #eigenvalues of Gram matrix
+
+  # "X must be full-rank for OATK!"
+  stopifnot(min(lam) > 1e-6)
+
+  # use same lambdas as GM
+  lambda_max = 1 * max(abs(t(X) %*% y)) / n
+  lambda_min = lambda_max/100
+  nlambda = 100
+  k = (0:(nlambda - 1))/nlambda
+  lambda = lambda_max * (lambda_min/lambda_max)^k
+  fit0.lasso = cv.glmnet(X, y, family = 'gaussian', lambda = lambda,
+                         nfold = 10, alpha = 1)
+  
+  lambda_ast = fit0.lasso$lambda.min
+  beta_hat = coef(fit0.lasso, s = "lambda.min")[-1]
+  
+  
+  # generate and run knockoffs
+  Sig.inv = V %*% diag(1 / lam) %*% t(V)
+
+  sigma = sqrt(1 / diag(Sig.inv))
+  B = - Sig.inv %*% diag(sigma^2)
+  diag(B) = 0
+  proj = X %*% B
+
+  Z <- matrix(rnorm(n * p),n)
+  Z <- Z - U %*% (t(U) %*% Z) #orthogonalize Z w.r.t. X
+  Z <- scale(Z) / sqrt(n-1) #scale Z to have unit norm
+  Z = Z %*% diag(sigma)
+
+  x_tilde = proj + Z
+    
+  para_list = foreach(j = 1:p, .packages = "glmnet") %do% 
+    {
+      xnew = cbind(x_tilde[, j], # first column is the knockoff column
+                   X[, -j])
+      
+      # knockoff regression
+      fit1.lasso = glmnet(xnew, y, family = 'gaussian', lambda = lambda_ast)
+      beta_tilde = coef(fit1.lasso, s = "lambda.min")[2] # accounting for intercept here
+      
+      return(beta_tilde)
+    }
+  
+  beta_tilde = unlist(para_list)
+
+
+  # generate knockoff statistics and reject
+  W = pmax(abs(beta_hat), abs(beta_tilde)) * sign(abs(beta_hat) - abs(beta_tilde))
+  threshold = knockoff.threshold(W, fdr=q, offset=offset)
+  rej = which(W >= threshold)
+
+  return(list(W=as.numeric(W), rej=rej, threshold=threshold, lam.ridge=lam.ridge))
+}
+
+
+
+
+# OAATK implementation using Ridge
+# with a pre-screening procedure using Lasso
+# this is the improved version with the rank-2 update of inverse of Sigma_Lam
+# with orthogonalization on null knocoffs wrt X_R
+oatk_screen_ridge = function (y, x, q = 0.1, offset=0)
+{
+  n = length(y)
+  p = dim(x)[2]
+
+  ############## Pre-screening using Lasso #################
+  # lasso regression for screening
+  # use same lambdas as GM
+  lambda_max = 1 * max(abs(t(x) %*% y)) / n
+  lambda_min = lambda_max/100
+  nlambda = 100
+  k = (0:(nlambda - 1))/nlambda
+  lambda = lambda_max * (lambda_min/lambda_max)^k
+  fit0.lasso = cv.glmnet(x, y, family = "gaussian", lambda = lambda,
+                         nfolds = 10, alpha = 1)
+
+
+  # obtain the coefficients
+  coef_ast = coef(fit0.lasso, s = "lambda.min")[-1]
+
+  # ensure the number of selected variables is less than n
+  if (sum(coef_ast != 0) > 0.9 * n) {
+    ord_idx = order(abs(coef_ast[which(coef_ast != 0)]))
+    coef_ast[which(coef_ast != 0)[1:(sum(coef_ast != 0) -
+                                       0.9 * n)]] = 0
+  }
+  bool.screened = coef_ast != 0
+  idx.screened = which(bool.screened)
+  num.screened = length(idx.screened)
+
+  if (length(idx.screened)==0 & (p > n)) {
+    warning('Pre-screening did not select any variables. Returning null set')
+    return(list(W=NULL, rej=NULL, threshold=NULL, lam.ridge=NULL))
+  }
+
+  ########### Obtaining the original ridge coefficients ##############
+  # run ridge regression and compute inverse ridge gram matrix
+  SVD.X <- svd(x) #X = U%*%diag(D)%*%t(V)
+  U <- SVD.X$u #nxp matrix
+  V <- SVD.X$v #pxp matrix
+  D <- SVD.X$d #px1 vector
+  lam <- D^2 #eigenvalues of Gram matrix
+  lam.ridge <- max(D^2)*(2/3)^(0:40) #set to 0 for OLS, or a fixed scalar for ridge wimatth specified regularization constant
+
+
+  # high-dimensional --> use 10-fold CV
+  if (p > n) {
+    fit.ridge = ridge.reg.Kfold(y, x, U, V, D, K=10L, lam.ridge)
+    lam.ridge = fit.ridge$lam.best
+    beta_hat = fit.ridge$beta.hat
+    Sig.inv.lam = qr.solve(t(x)%*%x + lam.ridge * diag(nrow=p) )
+    
+    # low-dimensional --> use LOOCV
+  } else {
+    mdl.ridge <- ridge.reg(Y=y, U=U, D=D, V=V, lam = lam.ridge)
+    beta_hat <- mdl.ridge$beta.hat  #ridge regression coefficients
+    lam.ridge <- mdl.ridge$lam.best  #final ridge regression regularization parameter
+    Sig.inv.lam = V %*% diag(1 / (lam+lam.ridge)) %*% t(V)
+  }
+  beta_hat = as.numeric(beta_hat)
+
+  # Run SVD of the remaining columns
+  X_R = x[, bool.screened]
+  X_S = x[, !bool.screened]
+  SVD.X <- svd(X_R)
+  U_R <- SVD.X$u #nxp matrix
+  proj_U_R = U_R %*% t(U_R)
+  V_R <- SVD.X$v #pxp matrix
+  D_R <- SVD.X$d #px1 vector
+  lam_R <- D_R^2 #eigenvalues of Gram matrix
+  Sig.inv = V_R %*% diag(1 / lam_R) %*% t(V_R)
+
+  ##### Compute knockoff variable for the remaining columns
+  # compute the projection of each of the remaining remaining columns to the rest of the remaining column
+  sigma_R = sqrt(1 / diag(Sig.inv))
+  names(sigma_R) = idx.screened
+  B = - Sig.inv %*% diag(sigma_R^2)
+  diag(B) = 0
+  proj_R = X_R %*% B
+
+  Z_R = matrix(rnorm(n*num.screened), n)
+  Z_R <- Z_R - U_R %*% (t(U_R) %*% Z_R) #orthogonalize Z w.r.t. X_R
+  Z_R <- scale(Z_R) / sqrt(n-1) #scale Z to have unit norm
+  Z_R = Z_R %*% diag(sigma_R)
+
+  x_tilde_R = proj_R + Z_R
+  colnames(x_tilde_R) = idx.screened
+
+
+  ############### Run knockoff regressions ###################
+  Xy = t(x) %*% y
+
+  # cl <- makeCluster(ncores)
+  # registerDoParallel(cl)
+  beta_tilde = foreach(j = 1:p) %do%
+    {
+      xj = x[, j]
+      # generate the knockoff column
+      # case 1: screened in variable
+      if (j %in% idx.screened) {
+        xj_tilde = x_tilde_R[, as.character(j)]
+        # case 2: screened out variable --> Need to construct knockoff variable for it
+      } else {
+        proj = proj_U_R %*% xj
+        resid = xj - proj
+        sigma_j = l2_norm(resid)
+
+        u = xj - proj_U_R %*% xj
+        u = u / l2_norm(u)
+        orthog = cbind(U_R, u)
+
+        zj = rnorm(n)
+        zj = zj - orthog %*% (t(orthog) %*% zj) 
+        zj = zj / sqrt(sum(zj^2))
+        xj_tilde = proj + zj * sigma_j
+      }
+
+      # Compute inverse of Sigma_inv with the knockoff column
+      # note the gram matrix is a rank-2 update, so we use the Woodbury Formula
+      ej = numeric(p)
+      ej[j] = 1
+      v = as.numeric(t(x) %*% (xj_tilde - xj))
+      v[j] = 0
+      A = cbind(v, ej)
+      B = rbind(ej, v)
+      K = Sig.inv.lam %*% A
+      Sig.inv.lam.tilde = Sig.inv.lam - K %*% solve(diag(nrow=2) + B%*%K, t(K)[2:1, ])
+
+      # calculate knockoff coefficient
+      Xy_tilde = Xy
+      Xy_tilde[j] = t(xj_tilde) %*% y
+      beta_j = as.numeric(Sig.inv.lam.tilde[j, ] %*% Xy_tilde)
+
+      return(beta_j)
+    }
+  # stopCluster(cl)
+  beta_tilde = unlist(beta_tilde)
+
+  W = pmax(abs(beta_hat), abs(beta_tilde)) * sign(abs(beta_hat) - abs(beta_tilde))
+  threshold = knockoff.threshold(W, fdr=q, offset=offset)
+  rej = which(W >= threshold)
+
+
+  return(list(W=as.numeric(W), beta_hat=as.numeric(beta_hat), beta_tilde=as.numeric(beta_tilde), rej=rej, threshold=threshold, variable=fifelse(coef_ast != 0, 'remaining', 'screened')))
+}
+
+
+
+
+
+# OAATK implementation using Lasso
+# with a pre-screening procedure using Lasso
+# In this variant, we do orthogonalize the stochastic component of the null knockoffs
+# wrt to X_R.
+oatk_screen_lasso = function (y, x, q = 0.1, offset=0)
+{
+  n = length(y)
+  p = dim(x)[2]
+
+  ############## Pre-screening using Lasso #################
+  # lasso regression for screening
+  # use same lambdas as GM
+  lambda_max = 1 * max(abs(t(x) %*% y)) / n
+  lambda_min = lambda_max/100
+  nlambda = 100
+  k = (0:(nlambda - 1))/nlambda
+  lambda = lambda_max * (lambda_min/lambda_max)^k
+  fit0.lasso = cv.glmnet(x, y, family = "gaussian", lambda = lambda,
+                         nfolds = 10, alpha = 1)
+
+
+  # obtain the coefficients
+  beta_hat = coef(fit0.lasso, s = "lambda.min")[-1]
+  lam.lasso = fit0.lasso$lambda.min
+
+  # ensure the number of selected variables is less than n
+  if (sum(beta_hat != 0) > 0.9 * n) {
+    ord_idx = order(abs(beta_hat[which(beta_hat != 0)]))
+    beta_hat[which(beta_hat != 0)[1:(sum(beta_hat != 0) -
+                                       0.9 * n)]] = 0
+  }
+  bool.screened = beta_hat != 0
+  idx.screened = which(bool.screened)
+  num.screened = length(idx.screened)
+
+
+  if (length(idx.screened)==0 & (p > n)) {
+    warning('Pre-screening did not select any variables. Returning null set')
+    return(list(W=NULL, rej=NULL, threshold=NULL, lam.ridge=NULL))
+  }
+
+  # Run SVD of the remaining columns
+  X_R = x[, bool.screened]
+  X_S = x[, !bool.screened]
+  SVD.X <- svd(X_R)
+  U_R <- SVD.X$u #nxp matrix
+  proj_U_R = U_R %*% t(U_R)
+  V_R <- SVD.X$v #pxp matrix
+  D_R <- SVD.X$d #px1 vector
+  lam_R <- D_R^2 #eigenvalues of Gram matrix
+  Sig.inv = V_R %*% diag(1 / lam_R) %*% t(V_R)
+
+  ##### Compute knockoff variable for the remaining columns
+  # compute the projection of each of the remaining remaining columns to the rest of the remaining column
+  sigma_R = sqrt(1 / diag(Sig.inv))
+  names(sigma_R) = idx.screened
+  B = - Sig.inv %*% diag(sigma_R^2)
+  diag(B) = 0
+  proj_R = X_R %*% B
+
+  Z_R = matrix(rnorm(n*num.screened), n)
+  Z_R <- Z_R - U_R %*% (t(U_R) %*% Z_R) #orthogonalize Z w.r.t. X_R
+  Z_R <- scale(Z_R) / sqrt(n-1) #scale Z to have unit norm
+  Z_R = Z_R %*% diag(sigma_R)
+
+  x_tilde_R = proj_R + Z_R
+  colnames(x_tilde_R) = idx.screened
+
+
+  ############### Run knockoff regressions ###################
+  Xy = t(x) %*% y
+
+  # cl <- makeCluster(ncores)
+  # registerDoParallel(cl)
+
+  beta_tilde = foreach(j = 1:p, .packages="glmnet") %do%
+    {
+      xj = x[, j]
+      # generate the knockoff column
+      # case 1: screened in variable
+      if (j %in% idx.screened) {
+        xj_tilde = x_tilde_R[, as.character(j)]
+      # case 2: screened out variable --> Need to construct knockoff variable for it
+      } else {
+        proj = proj_U_R %*% xj
+        resid = xj - proj
+        sigma_j = l2_norm(resid)
+
+        u = xj - proj_U_R %*% xj
+        u = u / l2_norm(u)
+        orthog = cbind(U_R, u)
+
+        zj = rnorm(n)
+        zj = zj - orthog %*% (t(orthog) %*% zj)
+        zj = zj / sqrt(sum(zj^2))
+        xj_tilde = proj + zj * sigma_j
+      }
+
+      x_tilde = cbind(xj_tilde, x[, -j])
+      fit1.lasso = glmnet(x_tilde, y, family = "gaussian", lambda = lam.lasso)
+      beta = coef(fit1.lasso, s = "lambda.min")[2]
+
+
+      return(beta)
+    }
+  # stopCluster(cl)
+  beta_tilde = unlist(beta_tilde)
+
+  W = pmax(abs(beta_hat), abs(beta_tilde)) * sign(abs(beta_hat) - abs(beta_tilde))
+  threshold = knockoff.threshold(W, fdr=q, offset=offset)
+  rej = which(W >= threshold)
+
+  return(list(W=as.numeric(W), beta_hat=as.numeric(beta_hat), beta_tilde=as.numeric(beta_tilde), rej=rej, threshold=threshold, variable=fifelse(beta_hat != 0, 'remaining', 'screened')))
+
+}
+
+
+
 
 #' Derandomized One-at-a-time Knockoffs (OATK)
 #'

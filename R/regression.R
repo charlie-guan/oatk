@@ -75,3 +75,96 @@ eBH = function(e_values, alpha) {
 
   return(rej)
 }
+
+#' Ridge regression
+#'
+#' @description
+#' Function for conducting ridge and for finding lambda using K-fold cros-validation if
+#' lambda is a vector.
+#'
+#' @param y Response variable
+#' @param X Design matrix
+#' @param K The number of folds
+#' @param lambda_seq Ridge parameter. If lam is a scalar, ridge will be conducted with that lam.
+# If lam is a vector, K-fold CV is used to find the best value. 
+#'
+#' @return A list containing beta_hat (the regression coefficients) and lam.ridge (the corresponding ridge parameter)
+ridge.reg.Kfold <- function(y, X, U_full, V_full, D_full, K=10L, lambda_seq) {
+  # Number of observations
+  n <- nrow(X)
+  
+  # Randomly assign observations to folds
+  folds <- sample(rep_len(seq_len(K), n))
+  
+  # We'll accumulate the sum of MSEs for each lambda, across all folds
+  sum_mse <- numeric(length(lambda_seq))
+  
+  # ---- Outer loop over folds ----
+  for (k in seq_len(K)) {
+    # Identify training vs test rows
+    train_idx <- which(folds != k)
+    test_idx  <- which(folds == k)
+    
+    # Subset
+    X_train <- X[train_idx, , drop = FALSE]
+    y_train <- y[train_idx]
+    X_test  <- X[test_idx, , drop = FALSE]
+    y_test  <- y[test_idx]
+    
+    # ---- Compute SVD of the TRAINING data ----
+    svd_train <- svd(X_train)
+    U <- svd_train$u
+    D <- svd_train$d
+    V <- svd_train$v
+    
+    # Precompute (U^T * y_train) to speed repeated use
+    Uy <- t(U) %*% y_train
+    
+    # We will store MSE for each lambda on this particular fold
+    fold_mse <- numeric(length(lambda_seq))
+    
+    # ---- Inner loop over the lambda grid ----
+    for (i in seq_along(lambda_seq)) {
+      lam <- lambda_seq[i]
+      
+      # Compute ridge solution via SVD:
+      # beta = V * diag(D/(D^2 + lam)) * (U^T y_train)
+      denom <- D^2 + lam
+      # elementwise: D / (D^2 + lam)
+      w <- (D / denom) * Uy[seq_along(D)]
+      
+      # Multiply by V to get p-dimensional coefficients
+      beta_hat <- V[, seq_along(D), drop = FALSE] %*% w
+      
+      # Predict on test set, compute MSE
+      y_pred <- X_test %*% beta_hat
+      fold_mse[i] <- mean((y_test - y_pred)^2)
+    }
+    
+    # Accumulate MSE across folds
+    sum_mse <- sum_mse + fold_mse
+  }
+  
+  # Average MSE across K folds, for each lambda
+  cv_mse <- sum_mse / K
+  
+  # Select the best lambda
+  best_idx <- which.min(cv_mse)
+  best_lambda <- lambda_seq[best_idx]
+  
+  # Fit final model on the FULL dataset with the best lambda ---- 
+  Uy_full <- t(U_full) %*% y
+  
+  denom_full <- D_full^2 + best_lambda
+  w_full <- (D_full / denom_full) * Uy_full[seq_along(D_full)]
+  beta_best <- V_full[, seq_along(D_full), drop = FALSE] %*% w_full
+  
+  # Return a list with relevant info
+  return(list(
+    lam.best = best_lambda,
+    beta.hat = beta_best,   # fitted on the entire dataset
+    cv_mse = cv_mse,    # average MSE across folds for each lambda
+    lambdas = lambda_seq
+  ))
+}
+

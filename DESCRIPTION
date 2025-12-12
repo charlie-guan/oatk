@@ -16,6 +16,7 @@ Imports:
   glmnet,
   stringr,
   stats,
-  utils
-  
+  utils,
+  Matrix,
+  foreach
   
